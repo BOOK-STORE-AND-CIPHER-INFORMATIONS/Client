@@ -6,6 +6,9 @@ import base64
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 
+# Désactiver les avertissements InsecureRequestWarning de urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 class APIClient:
     def __init__(self, base_url="http://localhost:8080"):
         self.base_url = base_url
