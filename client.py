@@ -3,8 +3,11 @@ import requests
 import json
 import urllib3
 import base64  
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
+import os
 
 # Désactiver les avertissements InsecureRequestWarning de urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -19,6 +22,7 @@ class APIClient:
         self.public_key = None
         self.private_key = None
         self.symmetric_key = None  # Stocker la clé symétrique si nécessaire
+        self.server_public_key_obj = None  # Objet clé publique pour vérification
     
     def login(self, username, password):
         """Effectue la connexion et stocke le token"""
@@ -91,7 +95,7 @@ class APIClient:
             # Envoyer la clé publique au serveur avec le bon nom de champ
             response = self.session.post(
                 f"{self.base_url}/api/exchange",
-                json={"publicKey": public_key_b64},  # Changé de "public_key" à "publicKey"
+                json={"publicKey": public_key_b64},
                 headers={
                     'Content-Type': 'application/ld+json',
                     'Authorization': f'Bearer {self.token}'
@@ -114,49 +118,157 @@ class APIClient:
 
             # Décoder les clés base64
             self.public_key_server = base64.b64decode(server_public_key_b64).decode('utf-8')
-            self.symmetric_key_encrypted = base64.b64decode(symmetric_key_b64)
+
+            # Charger la clé publique du serveur pour vérification de signature
+            self.server_public_key_obj = serialization.load_pem_public_key(
+                self.public_key_server.encode('utf-8'),
+                backend=default_backend()
+            )
+
+            # Décrypter la clé symétrique avec la clé privée du client
+            self.symmetric_key = self.private_key.decrypt(
+                base64.b64decode(symmetric_key_b64),
+                padding.PKCS1v15()
+            )
 
             print("✓ Échange de clés réussi")
             return {
                 "server_public_key": self.public_key_server,
-                "symmetric_key": self.symmetric_key_encrypted
+                "symmetric_key": self.symmetric_key
             }
 
         except requests.exceptions.RequestException as e:
             print(f"Erreur lors de l'échange de clés: {e}")
             return None
-    
+        except Exception as e:
+            print(f"Erreur lors du traitement des clés: {e}")
+            return None
+
+    def symmetric_decrypt(self, encrypted_data: str) -> str:
+        """Décrypte les données avec AES-256-CBC"""
+        try:
+            # Décoder le base64
+            encrypted_bytes = base64.b64decode(encrypted_data)
+            
+            # Extraire l'IV (16 premiers octets pour AES)
+            iv = encrypted_bytes[:16]
+            ciphertext = encrypted_bytes[16:]
+            
+            # Décrypter
+            cipher = Cipher(
+                algorithms.AES(self.symmetric_key),
+                modes.CBC(iv),
+                backend=default_backend()
+            )
+            decryptor = cipher.decryptor()
+            padded_data = decryptor.update(ciphertext) + decryptor.finalize()
+            
+            # Retirer le padding PKCS7
+            padding_length = padded_data[-1]
+            data = padded_data[:-padding_length]
+            
+            return data.decode('utf-8')
+            
+        except Exception as e:
+            print(f"Erreur de décryptage symétrique: {e}")
+            return None
+
+    def verify_signature(self, data: str, signature: str) -> bool:
+        """Vérifie la signature SHA512 avec la clé publique du serveur"""
+        try:
+            signature_bytes = base64.b64decode(signature)
+            
+            self.server_public_key.verify(
+                signature_bytes,
+                data.encode('utf-8'),
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA512()),
+                    salt_length=padding.PSS.MAX_LENGTH
+                ),
+                hashes.SHA512()
+            )
+            return True
+            
+        except Exception as e:
+            print(f"Erreur de vérification de signature: {e}")
+            return False
+
+    def decrypt_response(self, response_data: dict) -> dict:
+        """Décrypte et vérifie une réponse du serveur"""
+        try:
+            # Extraire les données chiffrées
+            encrypted_data = response_data.get('encrypted_data')
+            if not encrypted_data:
+                print("Aucune donnée chiffrée trouvée")
+                return None
+            
+            # Décrypter les données
+            decrypted_json = self.symmetric_decrypt(encrypted_data)
+            if not decrypted_json:
+                return None
+            
+            # Parser le JSON décrypté
+            decrypted_data = json.loads(decrypted_json)
+            
+            # Extraire les données et la signature
+            json_data = decrypted_data.get('json_data')
+            signature = decrypted_data.get('signature')
+            
+            if not json_data or not signature:
+                print("Données ou signature manquantes")
+                return None
+            
+            # Vérifier la signature
+            if not self.verify_signature(json_data, signature):
+                print("✗ Signature invalide!")
+                return None
+            
+            print("✓ Signature vérifiée")
+            
+            # Retourner les données originales
+            return json.loads(json_data)
+            
+        except Exception as e:
+            print(f"Erreur lors du décryptage de la réponse: {e}")
+            return None
+
     def get(self, endpoint):
-        """Effectue une requête GET"""
+        """Effectue une requête GET et décrypte la réponse"""
         try:
             response = self.session.get(f"{self.base_url}{endpoint}")
             response.raise_for_status()
-            return response.json()
+            
+            response_data = response.json()
+            
+            # Vérifier si c'est une réponse chiffrée
+            if 'encrypted_data' in response_data:
+                return self.decrypt_response(response_data)
+            else:
+                # Réponse non chiffrée (login, exchange, etc.)
+                return response_data
+                
         except requests.exceptions.RequestException as e:
             print(f"Erreur GET {endpoint}: {e}")
             return None
-    
+
     def post(self, endpoint, data=None):
-        """Effectue une requête POST"""
+        """Effectue une requête POST et décrypte la réponse"""
         try:
-            # Ne pas écraser les headers de session, les fusionner
-            headers = {'Content-Type': 'application/json'}
-            if 'Authorization' in self.session.headers:
-                headers['Authorization'] = self.session.headers['Authorization']
-            
-            
-            
             response = self.session.post(
                 f"{self.base_url}{endpoint}", 
                 json=data
             )
             
-            # Debug: voir la requête envoyée
-            print(f"Debug - URL finale: {response.url}")
-            print(f"Debug - Headers envoyés: {response.request.headers}")
-            
             response.raise_for_status()
-            return response.json()
+            response_data = response.json()
+            
+            # Vérifier si c'est une réponse chiffrée
+            if 'encrypted_data' in response_data:
+                return self.decrypt_response(response_data)
+            else:
+                # Réponse non chiffrée (login, exchange, etc.)
+                return response_data
+                
         except requests.exceptions.RequestException as e:
             print(f"Erreur POST {endpoint}: {e}")
             return None
