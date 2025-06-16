@@ -17,12 +17,12 @@ class APIClient:
         self.base_url = base_url
         self.session = requests.Session()
         self.session.verify = False
-        self.token = None  # Stocker le token JWT
-        self.public_key_server = None  # Stocker la clé publique du serveur
+        self.token = None
+        self.public_key_server = None  
         self.public_key = None
         self.private_key = None
-        self.symmetric_key = None  # Stocker la clé symétrique si nécessaire
-        self.server_public_key_obj = None  # Objet clé publique pour vérification
+        self.symmetric_key = None 
+        self.server_public_key_obj = None  
     
     def login(self, username, password):
         """Effectue la connexion et stocke le token"""
@@ -35,24 +35,19 @@ class APIClient:
             
             response.raise_for_status()
             
-            # Vérifier si la réponse est vide
             if not response.text.strip():
                 print("✗ Réponse vide du serveur")
                 return False
             
-            # Vérifier si c'est du JSON
             if 'application/json' not in response.headers.get('content-type', ''):
                 print(f"✗ Type de contenu inattendu: {response.headers.get('content-type')}")
                 return False
             
             data = response.json()
             
-            # Récupérer le token (peut être 'token' ou 'access_token' selon votre API)
             self.token = data.get('token') or data.get('access_token')
             
             if self.token:
-                # Ajouter le token à toutes les futures requêtes
-                # Merge the Authorization header without overwriting other headers
                 self.session.headers['Authorization'] = f'Bearer {self.token}'
                 print(f"✓ Connexion réussie, token reçu")
                 return True
@@ -71,7 +66,7 @@ class APIClient:
     
     def exchange_keys(self):
         try:
-            # Vérifier que nous sommes connectés
+
             if not self.token:
                 print("✗ Aucun token d'authentification. Connectez-vous d'abord.")
                 return None
@@ -103,11 +98,8 @@ class APIClient:
             )
             
             response.raise_for_status()
-
-            # Récupérer la réponse du serveur
             data = response.json()
             
-            # Le serveur renvoie les clés avec les noms "publicKey" et "symmetricKey"
             server_public_key_b64 = data.get('publicKey')
             symmetric_key_b64 = data.get('symmetricKey')
 
@@ -116,16 +108,13 @@ class APIClient:
                 print(f"Données reçues: {data}")
                 return None
 
-            # Décoder les clés base64
             self.public_key_server = base64.b64decode(server_public_key_b64).decode('utf-8')
 
-            # Charger la clé publique du serveur pour vérification de signature
             self.server_public_key_obj = serialization.load_pem_public_key(
                 self.public_key_server.encode('utf-8'),
                 backend=default_backend()
             )
 
-            # Décrypter la clé symétrique avec la clé privée du client
             self.symmetric_key = self.private_key.decrypt(
                 base64.b64decode(symmetric_key_b64),
                 padding.PKCS1v15()
@@ -154,12 +143,12 @@ class APIClient:
             iv = encrypted_bytes[:16]
             ciphertext = encrypted_bytes[16:]
             
-            # Décrypter
             cipher = Cipher(
                 algorithms.AES(self.symmetric_key),
                 modes.CBC(iv),
                 backend=default_backend()
             )
+            
             decryptor = cipher.decryptor()
             padded_data = decryptor.update(ciphertext) + decryptor.finalize()
             
@@ -173,18 +162,80 @@ class APIClient:
             print(f"Erreur de décryptage symétrique: {e}")
             return None
 
+    def symmetric_encrypt(self, data: str) -> str:
+        """Chiffre les données avec AES-256"""
+        try:
+            
+            iv = os.urandom(16)
+
+            # Padding PKCS7
+            padding_length = 16 - (len(data.encode('utf-8')) % 16)
+            padded_data = data.encode('utf-8') + bytes([padding_length] * padding_length)
+            
+            cipher = Cipher(
+                algorithms.AES(self.symmetric_key),
+                modes.CBC(iv),
+                backend=default_backend()
+            )
+            encryptor = cipher.encryptor()
+            ciphertext = encryptor.update(padded_data) + encryptor.finalize()
+            
+            encrypted_data = iv + ciphertext
+            return base64.b64encode(encrypted_data).decode('utf-8')
+            
+        except Exception as e:
+            print(f"Erreur de chiffrement symétrique: {e}")
+            return None
+
+    def sign_data(self, data: str) -> str:
+        """Signe les données avec la clé privée du client"""
+        try:
+            signature = self.private_key.sign(
+                data.encode('utf-8'),
+                padding.PKCS1v15(),
+                hashes.SHA512()
+            )
+            return base64.b64encode(signature).decode('utf-8')
+            
+        except Exception as e:
+            print(f"Erreur de signature: {e}")
+            return None
+
+    def create_encrypted_request(self, data: dict) -> dict:
+        """Crée une requête chiffrée et signée"""
+        try:
+
+            json_data = json.dumps(data, separators=(',', ':'))
+            
+            signature = self.sign_data(json_data)
+            if not signature:
+                return None
+            
+            payload = {
+                "json_data": json_data,
+                "signature": signature
+            }
+            
+            encrypted_data = self.symmetric_encrypt(json.dumps(payload, separators=(',', ':')))
+            if not encrypted_data:
+                return None
+            
+            return {"encrypted_data": encrypted_data}
+            
+        except Exception as e:
+            print(f"Erreur lors de la création de la requête chiffrée: {e}")
+            return None
+
     def verify_signature(self, data: str, signature: str) -> bool:
-        """Vérifie la signature SHA512 avec la clé publique du serveur"""
+        """Vérifie la signature SHA512 avec la clé publique du serveur (compatible avec openssl_sign PHP)"""
         try:
             signature_bytes = base64.b64decode(signature)
             
-            self.server_public_key.verify(
+            # PHP openssl_sign utilise PKCS1v15 par défaut
+            self.server_public_key_obj.verify(
                 signature_bytes,
                 data.encode('utf-8'),
-                padding.PSS(
-                    mgf=padding.MGF1(hashes.SHA512()),
-                    salt_length=padding.PSS.MAX_LENGTH
-                ),
+                padding.PKCS1v15(),
                 hashes.SHA512()
             )
             return True
@@ -195,37 +246,33 @@ class APIClient:
 
     def decrypt_response(self, response_data: dict) -> dict:
         """Décrypte et vérifie une réponse du serveur"""
-        try:
-            # Extraire les données chiffrées
+        try:            
+
             encrypted_data = response_data.get('encrypted_data')
             if not encrypted_data:
                 print("Aucune donnée chiffrée trouvée")
                 return None
-            
-            # Décrypter les données
+                        
             decrypted_json = self.symmetric_decrypt(encrypted_data)
             if not decrypted_json:
+                print("Erreur lors du décryptage")
                 return None
-            
-            # Parser le JSON décrypté
+                        
             decrypted_data = json.loads(decrypted_json)
             
-            # Extraire les données et la signature
             json_data = decrypted_data.get('json_data')
             signature = decrypted_data.get('signature')
             
             if not json_data or not signature:
                 print("Données ou signature manquantes")
                 return None
-            
-            # Vérifier la signature
+                        
             if not self.verify_signature(json_data, signature):
                 print("✗ Signature invalide!")
                 return None
             
             print("✓ Signature vérifiée")
             
-            # Retourner les données originales
             return json.loads(json_data)
             
         except Exception as e:
@@ -240,13 +287,8 @@ class APIClient:
             
             response_data = response.json()
             
-            # Vérifier si c'est une réponse chiffrée
-            if 'encrypted_data' in response_data:
-                return self.decrypt_response(response_data)
-            else:
-                # Réponse non chiffrée (login, exchange, etc.)
-                return response_data
-                
+            return self.decrypt_response(response_data)
+         
         except requests.exceptions.RequestException as e:
             print(f"Erreur GET {endpoint}: {e}")
             return None
@@ -254,10 +296,53 @@ class APIClient:
     def post(self, endpoint, data=None):
         """Effectue une requête POST et décrypte la réponse"""
         try:
-            response = self.session.post(
-                f"{self.base_url}{endpoint}", 
-                json=data
-            )
+            print(f"Données à envoyer: {data}")  # Debug
+            
+            if self.symmetric_key and data is not None:
+                encrypted_request = self.create_encrypted_request(data)
+                if not encrypted_request:
+                    print("Erreur lors de la création de la requête chiffrée")
+                    return None
+                print(f"Requête chiffrée: {encrypted_request}")  # Debug
+                response = self.session.post(
+                    f"{self.base_url}{endpoint}",
+                    json=encrypted_request,
+                    headers={'Content-Type': 'application/ld+json'}
+                )
+        
+            if response.status_code != 200:
+                # Afficher le contenu de la réponse d'erreur
+                print(f"Erreur {response.status_code}: {response.text}")
+                response.raise_for_status()
+            
+            response_data = response.json()
+            return self.decrypt_response(response_data)
+
+                
+        except requests.exceptions.RequestException as e:
+            print(f"Erreur POST {endpoint}: {e}")
+            return None
+
+    def put(self, endpoint, data=None):
+        """Effectue une requête PUT avec chiffrement"""
+        try:
+            if self.symmetric_key and data is not None:
+                encrypted_request = self.create_encrypted_request(data)
+                if not encrypted_request:
+                    print("Erreur lors de la création de la requête chiffrée")
+                    return None
+                
+                response = self.session.put(
+                    f"{self.base_url}{endpoint}",
+                    json=encrypted_request,
+                    headers={'Content-Type': 'application/ld+json'}
+                )
+            else:
+                response = self.session.put(
+                    f"{self.base_url}{endpoint}", 
+                    json=data, 
+                    headers={'Content-Type': 'application/ld+json'}
+                )
             
             response.raise_for_status()
             response_data = response.json()
@@ -266,38 +351,77 @@ class APIClient:
             if 'encrypted_data' in response_data:
                 return self.decrypt_response(response_data)
             else:
-                # Réponse non chiffrée (login, exchange, etc.)
                 return response_data
                 
-        except requests.exceptions.RequestException as e:
-            print(f"Erreur POST {endpoint}: {e}")
-            return None
-
-    def put(self, endpoint, data=None):
-        """Effectue une requête PUT"""
-        try:
-            headers = {'Content-Type': 'application/json'}
-            response = self.session.put(
-                f"{self.base_url}{endpoint}", 
-                json=data, 
-                headers=headers
-            )
-            response.raise_for_status()
-            return response.json()
         except requests.exceptions.RequestException as e:
             print(f"Erreur PUT {endpoint}: {e}")
             return None
 
     def delete(self, endpoint):
-        """Effectue une requête DELETE"""
+        """Effectue une requête DELETE avec chiffrement"""
         try:
-            response = self.session.delete(f"{self.base_url}{endpoint}")
+            if self.symmetric_key:
+                encrypted_request = self.create_encrypted_request({})
+                if not encrypted_request:
+                    print("Erreur lors de la création de la requête chiffrée")
+                    return False
+                
+                response = self.session.post(
+                    f"{self.base_url}{endpoint}",
+                    json=encrypted_request,
+                    headers={'Content-Type': 'application/ld+json', 'X-HTTP-Method-Override': 'DELETE'}
+                )
+            else:
+                response = self.session.delete(f"{self.base_url}{endpoint}")
+            
             response.raise_for_status()
-            return True
+            
+            # Pour DELETE, on peut avoir une réponse vide ou avec données
+            if response.text.strip():
+                response_data = response.json()
+                if 'encrypted_data' in response_data:
+                    result = self.decrypt_response(response_data)
+                    return result is not None
+                else:
+                    return True
+            else:
+                return True
+                
         except requests.exceptions.RequestException as e:
             print(f"Erreur DELETE {endpoint}: {e}")
             return False
 
+
+    def postNoCypher(self, endpoint, data=None):
+        """Effectue une requête POST et décrypte la réponse"""
+        try:
+            print(f"Données à envoyer: {data}")  # Debug
+
+            response = self.session.post(
+                f"{self.base_url}{endpoint}", 
+                json=data,
+                headers={'Content-Type': 'application/ld+json'}
+            )
+        
+            if response.status_code != 200:
+                print(f"Erreur {response.status_code}: {response.text}")
+                response.raise_for_status()
+            
+            response_data = response.json()
+            
+            # Si pas de chiffrement, retourner directement
+            if not self.symmetric_key or 'encrypted_data' not in response_data:
+                return response_data
+            
+            return self.decrypt_response(response_data)
+
+                
+        except requests.exceptions.RequestException as e:
+            print(f"Erreur POST {endpoint}: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"Réponse d'erreur: {e.response.text}")
+            return None
+    
 def test_api():
     """Fonction de test pour l'API"""
     api = APIClient("https://localhost")
@@ -347,7 +471,92 @@ def test_api():
         return
     print()
     
-   
+    # Test CRUD complet pour les livres
+    print("2. Test CRUD des livres:")
+    
+    # Créer un livre
+    print("   2.1. Création d'un livre:")
+    
+    new_book = {
+        "title": "Le Guide du Développeur",
+        "author": "Test Author",
+        "type": "fiction",
+        "stock": 10,
+    }
+    
+    create_response = api.postNoCypher("/api/books", new_book)
+    if create_response:
+        book_id = create_response.get('id')  # Ajoutez cette ligne
+        print(f"   ✓ Livre créé avec succès, ID: {book_id}")
+    else:
+        print("   ✗ Erreur lors de la création du livre")
+        return
+    print()
+    
+    # Lire le livre créé
+    print("   2.2. Récupération du livre:")
+    
+    get_response = api.get(f"/api/books/142ab884-1dfb-472f-9801-57b12640ac7b")
+    
+    if get_response:
+        print(get_response)
+        print("   ✓ Livre récupéré avec succès")
+        print(f"   ID: {get_response.get('id')}")
+        print(f"   Titre: {get_response.get('title')}")
+        print(f"   Auteur: {get_response.get('author')}")
+    else:
+        print("   ✗ Erreur lors de la récupération du livre")
+        return
+    print()
+    
+    # Modifier le livre
+    print("   2.3. Modification du livre:")
+
+    updated_book = {
+        "title": "Le Guide du Développeur - Édition Révisée",
+        "author": "Test Author (Mis à jour)"
+    }
+    update_response = api.put(f"/api/books/142ab884-1dfb-472f-9801-57b12640ac7b", updated_book)
+    if update_response:
+        print("   ✓ Livre modifié avec succès")
+        print(f"   Nouveau titre: {update_response.get('title')}")
+        print(f"   Nouvel auteur: {update_response.get('author')}")
+    else:
+        print("   ✗ Erreur lors de la modification du livre")
+    print()
+    
+    # Lister tous les livres pour vérifier
+    print("   2.4. Liste de tous les livres:")
+    books_list = api.get("/api/books")
+    if books_list:
+        print(f"   ✓ {len(books_list)} livre(s) trouvé(s)")
+        for book in books_list:
+            print(f"   - ID: {book.get('id')}, Titre: {book.get('title')}")
+    else:
+        print("   ✗ Erreur lors de la récupération de la liste des livres")
+    print()
+    
+    # Supprimer le livre
+    print("   2.5. Suppression du livre:")
+    if book_id:
+        delete_response = api.delete(f"/api/books/{book_id}")
+        if delete_response:
+            print("   ✓ Livre supprimé avec succès")
+        else:
+            print("   ✗ Erreur lors de la suppression du livre")
+    print()
+    
+    # Vérifier que le livre a été supprimé
+    print("   2.6. Vérification de la suppression:")
+    if book_id:
+        verify_response = api.get(f"/api/books/{book_id}")
+        if verify_response is None:
+            print("   ✓ Livre correctement supprimé (non trouvé)")
+        else:
+            print("   ✗ Le livre existe encore après suppression")
+    print()
+    
+    print("=== FIN DES TESTS ===")
 
 def interactive_mode():
     """Mode interactif pour tester l'API"""
