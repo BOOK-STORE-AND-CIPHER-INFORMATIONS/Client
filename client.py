@@ -88,6 +88,7 @@ class APIClient:
             public_key_b64 = base64.b64encode(public_pem).decode('utf-8')
 
             # Envoyer la clé publique au serveur avec le bon nom de champ
+            print(public_key_b64)
             response = self.session.post(
                 f"{self.base_url}/api/exchange",
                 json={"publicKey": public_key_b64},
@@ -112,7 +113,7 @@ class APIClient:
 
             self.server_public_key_obj = serialization.load_pem_public_key(
                 self.public_key_server.encode('utf-8'),
-                backend=default_backend()
+                backend=default_backend
             )
 
             self.symmetric_key = self.private_key.decrypt(
@@ -210,7 +211,6 @@ class APIClient:
             signature = self.sign_data(json_data)
             if not signature:
                 return None
-            
             payload = {
                 "json_data": json_data,
                 "signature": signature
@@ -328,6 +328,7 @@ class APIClient:
         try:
             if self.symmetric_key and data is not None:
                 encrypted_request = self.create_encrypted_request(data)
+                print(f"Données à envoyer: {encrypted_request}")  # Debug
                 if not encrypted_request:
                     print("Erreur lors de la création de la requête chiffrée")
                     return None
@@ -343,18 +344,17 @@ class APIClient:
                     json=data, 
                     headers={'Content-Type': 'application/ld+json'}
                 )
-            
             response.raise_for_status()
             response_data = response.json()
-            
             # Vérifier si c'est une réponse chiffrée
             if 'encrypted_data' in response_data:
                 return self.decrypt_response(response_data)
             else:
                 return response_data
-                
         except requests.exceptions.RequestException as e:
             print(f"Erreur PUT {endpoint}: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"Réponse d'erreur: {e.response.text}")
             return None
 
     def delete(self, endpoint):
@@ -422,9 +422,38 @@ class APIClient:
                 print(f"Réponse d'erreur: {e.response.text}")
             return None
     
+    def patch(self, endpoint, data=None):
+        """Effectue une requête PATCH avec chiffrement"""
+        try:
+            if self.symmetric_key and data is not None:
+                encrypted_request = self.create_encrypted_request(data)
+                if not encrypted_request:
+                    print("Erreur lors de la création de la requête chiffrée")
+                    return None
+                response = self.session.patch(
+                    f"{self.base_url}{endpoint}",
+                    json=encrypted_request,
+                    headers={'Content-Type': 'application/merge-patch+json'}
+                )
+            else:
+                response = self.session.patch(
+                    f"{self.base_url}{endpoint}",
+                    json=data,
+                    headers={'Content-Type': 'application/merge-patch+json'}
+                )
+            response.raise_for_status()
+            response_data = response.json()
+            if 'encrypted_data' in response_data:
+                return self.decrypt_response(response_data)
+            else:
+                return response_data
+        except requests.exceptions.RequestException as e:
+            print(f"Erreur PATCH {endpoint}: {e}")
+            return None
+
 def test_api():
     """Fonction de test pour l'API"""
-    api = APIClient("https://localhost")
+    api = APIClient("http://localhost:8080")
     print("=== TEST DE L'API ===\n")
     
     # Test de connectivité
@@ -480,8 +509,8 @@ def test_api():
     new_book = {
         "title": "Le Guide du Développeur",
         "author": "Test Author",
-        "type": "fiction",
-        "stock": 10,
+        "type": "informatique",
+        "stock": 13,
     }
     
     create_response = api.postNoCypher("/api/books", new_book)
@@ -510,13 +539,13 @@ def test_api():
     print()
     
     # Modifier le livre
-    print("   2.3. Modification du livre:")
+    print("   2.3.1 PATCH Modification du livre:")
 
     updated_book = {
         "title": "Le Guide du Développeur - Édition Révisée",
-        "author": "Test Author (Mis à jour)"
+        "author": "Test Authoraqzsdfghjkl (Mis à jour)"
     }
-    update_response = api.put(f"/api/books/142ab884-1dfb-472f-9801-57b12640ac7b", updated_book)
+    update_response = api.patch(f"/api/books/142ab884-1dfb-472f-9801-57b12640ac7b", updated_book)
     if update_response:
         print("   ✓ Livre modifié avec succès")
         print(f"   Nouveau titre: {update_response.get('title')}")
@@ -524,13 +553,32 @@ def test_api():
     else:
         print("   ✗ Erreur lors de la modification du livre")
     print()
+
+    print("   2.3.2 PUT Modification du livre:")
+    updated_book = {
+        "title": "Le Guide du Développeur - Édition Révisée",
+        "author": "Test Author (Mis à jour)",
+        "type": "new type - informatique",
+        "stock": 10
+    }
+    update_response = api.put(f"/api/books/142ab884-1dfb-472f-9801-57b12640ac7b", updated_book)
+    if update_response:
+        print("   ✓ Livre modifié avec succès")
+        print(f"   Nouveau titre: {update_response.get('title')}")
+        print(f"   Nouvel auteur: {update_response.get('author')}")
+        print(f"   Nouveau titre: {update_response.get('type')}")
+        print(f"   Nouveau titre: {update_response.get('stock')}")
+    else:
+        print("   ✗ Erreur lors de la modification du livre")
+    print() 
+   
     
     # Lister tous les livres pour vérifier
     print("   2.4. Liste de tous les livres:")
     books_list = api.get("/api/books")
     if books_list:
         print(f"   ✓ {len(books_list)} livre(s) trouvé(s)")
-        for book in books_list:
+        for book in books_list.get('member'):
             print(f"   - ID: {book.get('id')}, Titre: {book.get('title')}")
     else:
         print("   ✗ Erreur lors de la récupération de la liste des livres")
