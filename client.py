@@ -513,7 +513,8 @@ def test_api():
         "stock": 13,
     }
     
-    create_response = api.postNoCypher("/api/books", new_book)
+    create_response = api.post("/api/books", new_book)
+    
     if create_response:
         book_id = create_response.get('id')  # Ajoutez cette ligne
         print(f"   ✓ Livre créé avec succès, ID: {book_id}")
@@ -524,9 +525,9 @@ def test_api():
     
     # Lire le livre créé
     print("   2.2. Récupération du livre:")
-    
-    get_response = api.get(f"/api/books/142ab884-1dfb-472f-9801-57b12640ac7b")
-    
+
+    get_response = api.get(f"/api/books/{book_id}")
+
     if get_response:
         print(get_response)
         print("   ✓ Livre récupéré avec succès")
@@ -606,67 +607,16 @@ def test_api():
     
     print("=== FIN DES TESTS ===")
 
-def interactive_mode():
-    """Mode interactif pour tester l'API"""
-    api = APIClient("http://localhost:8080")  # Port 8080
-    
-    while True:
-        print("\n=== CLIENT API INTERACTIF ===")
-        print("1. Lister les livres")
-        print("2. Lister les comptes")
-        print("3. Créer un livre")
-        print("4. Requête GET personnalisée")
-        print("5. Requête POST personnalisée")
-        print("0. Quitter")
-        
-        choice = input("\nChoisissez une option: ")
-        
-        if choice == "0":
-            break
-        elif choice == "1":
-            books = api.get("/api/books")
-            if books:
-                print(json.dumps(books, indent=2))
-            else:
-                print("Aucun livre ou erreur")
-        elif choice == "2":
-            accounts = api.get("/api/accounts")
-            if accounts:
-                print(json.dumps(accounts, indent=2))
-            else:
-                print("Aucun compte ou erreur")
-        elif choice == "3":
-            title = input("Titre du livre: ")
-            author = input("Auteur: ")
-            book_data = {"title": title, "author": author}
-            result = api.post("/api/books", book_data)
-            if result:
-                print("Livre créé:", json.dumps(result, indent=2))
-        elif choice == "4":
-            endpoint = input("Endpoint (ex: /api/books): ")
-            result = api.get(endpoint)
-            if result:
-                print(json.dumps(result, indent=2))
-        elif choice == "5":
-            endpoint = input("Endpoint (ex: /api/books): ")
-            data_str = input("Données JSON (ou appuyez sur Entrée pour vide): ")
-            data = json.loads(data_str) if data_str else None
-            result = api.post(endpoint, data)
-            if result:
-                print(json.dumps(result, indent=2))
 
 # Utilisation
 if __name__ == "__main__":
-    print("Choisissez le mode:")
-    print("1. Test automatique")
-    print("2. Mode interactif")
-    
-    mode = input("Mode (1 ou 2): ")
-    
-    if mode == "1":
-        test_api()
-    elif mode == "2":
-        interactive_mode()
+    n = int(input("Combien de fois voulez-vous tester l'API ? "))
+    if n == 0:
+        while True:
+            print(f"\n=== TEST {n} ===")
+            test_api()
+            n += 1
     else:
-        print("Mode invalide, lancement du test automatique:")
-        test_api()
+        for i in range(n):
+            print(f"\n=== TEST {i + 1} ===")
+            test_api()
