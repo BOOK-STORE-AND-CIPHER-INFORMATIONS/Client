@@ -610,7 +610,16 @@ def test_api():
 
 # Utilisation
 if __name__ == "__main__":
-    n = int(input("Combien de fois voulez-vous tester l'API ? "))
+    n_env = os.getenv("N_RUNS")
+    try:
+        if n_env is not None:
+            n = int(n_env)
+        else:
+            n = int(input("Combien de fois voulez-vous tester l'API ? "))
+    except ValueError:
+        print("Valeur incorrecte dans N_RUNS, utilisation de la saisie utilisateur.")
+        n = int(input("Combien de fois voulez-vous tester l'API ? "))
+
     if n == 0:
         while True:
             print(f"\n=== TEST {n} ===")
