@@ -453,7 +453,7 @@ class APIClient:
 
 def test_api():
     """Fonction de test pour l'API"""
-    api = APIClient("http://localhost:8080")
+    api = APIClient(os.getenv("API_URL", "http://localhost:8080"))
     print("=== TEST DE L'API ===\n")
     
     # Test de connectivité
